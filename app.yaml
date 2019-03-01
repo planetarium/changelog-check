@@ -1,0 +1,30 @@
+application: changelog-check
+version: 1
+runtime: python27
+api_version: 1
+threadsafe: yes
+
+handlers:
+
+- url: .*
+  script: changelog_check.app
+
+libraries:
+- name: flask
+  version: "0.12"
+- name: pycrypto
+  version: "2.6.1"
+- name: werkzeug
+  version: "0.11.10"
+
+env_variables:
+  # GitHub App id
+  APP_ID: '12345'
+  # Webhook secret
+  SECRET_KEY: "0000000000000000000000000000000000000000"
+  # Private key (PEM)
+  PRIVATE_KEY: |
+    -----BEGIN RSA PRIVATE KEY-----
+    ...
+    -----END RSA PRIVATE KEY-----
+  DEBUG: '1'
