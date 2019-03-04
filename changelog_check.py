@@ -24,8 +24,17 @@ import os
 import re
 import warnings
 
-from flask import Flask, current_app, redirect, request
+from Crypto.PublicKey import RSA
+from flask import (
+    Flask,
+    current_app,
+    redirect,
+    request,
+    render_template,
+    url_for,
+)
 from google.appengine.api import memcache, urlfetch
+from google.appengine.ext import ndb
 from google.appengine.ext.deferred import defer
 from jwt import encode, register_algorithm, unregister_algorithm
 from jwt.contrib.algorithms.pycrypto import RSAAlgorithm
@@ -53,38 +62,38 @@ register_algorithm('RS256', RSAAlgorithm(RSAAlgorithm.SHA256))
 
 
 app = Flask(__name__)
-try:
-    app.config['APP_ID'] = int(os.environ['APP_ID'])
-except KeyError:
-    raise KeyError(
-        'The environment variable APP_ID does not exist. '
-        'Define env_variables.APP_ID in app.yaml file so that '
-        "it is the same to your GitHub App's ID."
-    )
-except ValueError:
-    raise KeyError(
-        'The environment variable APP_ID must consists of only digits.'
-    )
-if os.environ.get('SECRET_KEY'):
-    app.secret_key = os.environ['SECRET_KEY']
-else:
-    warnings.warn(
-        'The envrionment variable SECRET_KEY does not exist. '
-        'Define env_variables.SECRET_KEY in app.yaml file so that '
-        "it is the same to your GitHub App's Webhook secret.  See also:\n"
-        '  https://developer.github.com/webhooks/securing/'
-    )
-    app.secret_key = os.urandom(20)
-try:
-    app.config['PRIVATE_KEY'] = os.environ['PRIVATE_KEY']
-except KeyError:
-    raise KeyError(
-        'The environment variable PRIVATE_KEY does not exist. '
-        'Generate a private key for your GitHub App and fefine '
-        'env_variables.PRIVATE_KEY in app.yaml file to its content.'
-    )
 app.debug = \
     os.environ.get('DEBUG', '').strip() in ('1', 'true', 't', 'yes', 'y')
+
+
+class ConfigItem(ndb.Model):
+    value = ndb.BlobProperty()
+
+
+def set_config(name, value):
+    key = ndb.Key(ConfigItem, name)
+    item = key.get()
+    if isinstance(value, unicode):
+        value = value.encode('utf-8')
+    if item is None:
+        item = ConfigItem(id=name, value=value)
+    else:
+        item.value = value
+    item.put()
+
+
+RAISE_ERROR = object()
+
+
+def get_config(name, error_value=RAISE_ERROR):
+    key = ndb.Key(ConfigItem, name)
+    item = key.get()
+    if item is None:
+        if error_value is RAISE_ERROR:
+            url = url_for('config_form', _external=True)
+            raise BadRequest('Not properly configured yet.  Go to ' + url)
+        return error_value
+    return item.value
 
 
 def validate_signature(request=request):
@@ -93,15 +102,65 @@ def validate_signature(request=request):
     except KeyError:
         raise BadRequest('X-Hub-Signature header is missing.')
     data = request.get_data()
-    digest = hmac.new(current_app.secret_key, data, hashlib.sha1)
+    secret_key = get_config('webhook_secret')
+    digest = hmac.new(secret_key, data, hashlib.sha1)
     expected_sig = 'sha1=' + digest.hexdigest()
     if not hmac.compare_digest(actual_sig.encode('utf-8'), expected_sig):
         raise BadRequest('X-Hub-Signature header has an invalid signature.')
 
 
-@app.route('/', methods=['GET'])
+@app.route('/')
 def index():
+    configs = 'webhook_secret', 'app_id', 'app_slug', 'private_key'
+    if any(get_config(cfg, None) is None for cfg in configs):
+        return redirect(url_for('config_form'))
     return redirect('https://github.com/apps/changelog-check')
+
+
+@app.route('/config/')
+def config_form(error_response=None):
+    private_key = get_config('private_key', None)
+    if private_key:
+        pubkey = RSA.importKey(private_key).publickey()
+        digest = hashlib.sha1(pubkey.exportKey('DER')).digest()
+        fingerprint = ':'.join('{0:02x}'.format(ord(b)) for b in digest)
+    else:
+        fingerprint = None
+    return render_template(
+        'config_form.html',
+        get_config=get_config,
+        error_response=error_response,
+        fingerprint=fingerprint,
+    )
+
+
+@app.route('/config/', methods=['POST'])
+def save_config():
+    app_id = request.form['app_id']
+    try:
+        private_key = request.files['private_key']
+    except KeyError:
+        pass
+    else:
+        private_key = private_key.stream.read()
+    token = get_access_token(app_id, private_key)
+    response = urlfetch.fetch(
+        'https://api.github.com/app',
+        method='GET',
+        headers={
+            'Accept': 'application/vnd.github.machine-man-preview+json',
+            'Authorization': 'Bearer ' + token,
+        },
+    )
+    log_response(__name__ + '.save_config', response)
+    if 200 <= response.status_code < 400:
+        html_url = json.loads(response.content)['html_url']
+        set_config('app_slug', html_url.split('/')[-1])
+        set_config('app_id', app_id)
+        set_config('webhook_secret', request.form['webhook_secret'])
+        set_config('private_key', private_key)
+        return config_form()
+    return config_form(error_response=response)
 
 
 @app.route('/', methods=['POST'])
@@ -155,9 +214,9 @@ def log_response(logger, response):
         logger.error('response.content = %r', response.content)
 
 
-def get_access_token():
-    app_id = current_app.config['APP_ID']
-    pem = current_app.config['PRIVATE_KEY']
+def get_access_token(app_id=None, private_key=None):
+    app_id = app_id or get_config('app_id')
+    pem = private_key or get_config('private_key')
     now = datetime.datetime.utcnow()
     payload = {
         'iat': now,

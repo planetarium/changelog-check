@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Changelog Check &mdash; Configuration</title>
+    <style>
+    .error { color: maroon; margin-bottom: 1em; border-bottom: 1px solid red; }
+    form > div {
+      border-bottom: 1px solid silver;
+      padding-bottom: 1em;
+      margin-bottom: 1em;
+    }
+    form > div > p { font-size: smaller; }
+    form > div > :last-child { margin-bottom: 0; }
+    </style>
+  </head>
+  <body>
+    {% if error_response is not none %}
+      <div class="error">
+        <p>Something went wrong.  GitHub API responded with the following
+          error:</p>
+        <pre><code>{{ error_response.status_code -}}
+{% for header, value in error_response.headers|dictsort %}
+{{ header }}: {{ value }}
+{%- endfor %}
+
+{{ error_response.content }}</code></pre>
+      </div>
+    {% endif %}
+    <form
+      enctype="multipart/form-data"
+      method="post"
+      action="{{ url_for('save_config') }}">
+      <div>
+        <label for="app_id">GitHub App ID</label>
+        <input
+          id="app_id"
+          name="app_id"
+          pattern="^[1-9][0-9]*$"
+          value="{{ get_config('app_id', '') }}"
+          required>
+        {% with app_slug = get_config('app_slug', None) %}
+          {% if app_slug %}
+            <a href="https://github.com/apps/{{ app_slug }}">
+              <strong>@{{ app_slug }}</strong>
+            </a>
+          {% endif %}
+        {% endwith %}
+      </div>
+      <div>
+        <label for="webhook_secret">Webhook secret</label>
+        <input
+          id="webhook_secret"
+          name="webhook_secret"
+          type="password"
+          value="{{ get_config('webhook_secret', '') }}"
+          required>
+        <p>This should be the same to the GitHub App's Webhook secret.
+          See also the <a href="https://developer.github.com/webhooks/securing/"
+          >docs</a>.</p>
+      </div>
+      <div>
+        <label for="private_key">Private key</label>
+        <input
+          id="private_key"
+          name="private_key"
+          type="file">
+        {% if fingerprint %}
+          <strong>{{ fingerprint }}</strong>
+        {% endif %}
+        <p><a href="https://git.io/fhx2w#generating-a-private-key">Generate
+          a private key</a> for the GitHub App and upload it.</p>
+      </div>
+      <button type="submit">Save</button>
+    </form>
+  </body>
+</html>

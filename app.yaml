@@ -5,6 +5,9 @@ api_version: 1
 threadsafe: yes
 
 handlers:
+- url: /config/
+  script: changelog_check.app
+  login: admin
 - url: .*
   script: changelog_check.app
 - url: /_ah/queue/deferred
@@ -23,13 +26,4 @@ libraries:
   version: "0.11.10"
 
 env_variables:
-  # GitHub App id
-  APP_ID: '12345'
-  # Webhook secret
-  SECRET_KEY: "0000000000000000000000000000000000000000"
-  # Private key (PEM)
-  PRIVATE_KEY: |
-    -----BEGIN RSA PRIVATE KEY-----
-    ...
-    -----END RSA PRIVATE KEY-----
   DEBUG: '1'
