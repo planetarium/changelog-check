@@ -5,9 +5,14 @@ api_version: 1
 threadsafe: yes
 
 handlers:
-
 - url: .*
   script: changelog_check.app
+- url: /_ah/queue/deferred
+  script: google.appengine.ext.deferred.deferred.application
+  login: admin
+
+builtins:
+- deferred: on
 
 libraries:
 - name: flask

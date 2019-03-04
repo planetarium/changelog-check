@@ -6,10 +6,12 @@ import hmac
 import json
 import logging
 import os
+import re
 import warnings
 
 from flask import Flask, current_app, redirect, request
 from google.appengine.api import memcache, urlfetch
+from google.appengine.ext.deferred import defer
 from jwt import encode, register_algorithm, unregister_algorithm
 from jwt.contrib.algorithms.pycrypto import RSAAlgorithm
 from dateutil.parser import isoparse
@@ -19,6 +21,14 @@ from werkzeug.exceptions import BadRequest
 
 CHECK_NAME = 'changelog'
 UNIX_EPOCH = datetime.datetime(1970, 1, 1, tzinfo=UTC)
+FILENAME_RE = re.compile(
+    ur'(?:^|/)change(?:s|log)(?:\.|$)',
+    re.IGNORECASE | re.UNICODE,
+)
+SKIP_RE = re.compile(
+    ur'\[(?:changelog\s+skip|skip\s+changelog)\]',
+    re.IGNORECASE | re.UNICODE,
+)
 
 try:
     unregister_algorithm('RS256')
@@ -167,6 +177,10 @@ def get_installation_token(installation_id):
     return token
 
 
+def ping(data):
+    return '', 200, {'Content-Type': 'text/plain'}
+
+
 def check_suite(data):
     action = lookup(data, 'action')
     if action == 'requested':
@@ -190,8 +204,92 @@ def check_suite(data):
             }),
         )
         log_response(__name__ + '.check_suite', response)
+        check_run_url = json.loads(response.content)['url']
+        defer(
+            scan_commits,
+            installation_id,
+            repo_url,
+            check_run_url,
+            before,
+            after,
+        )
     return json.dumps(data), 200, {'Content-Type': 'application/json'}
 
 
-def ping(data):
-    return '', 200, {'Content-Type': 'text/plain'}
+def scan_commits(installation_id, repository_url, check_run_url,
+                 before, after):
+    def update_check_run(status, **payload):
+        payload.update(status=status, name=CHECK_NAME)
+        token = get_installation_token(installation_id)
+        response = urlfetch.fetch(
+            check_run_url,
+            method='PATCH',
+            headers={
+                'Content-Type': 'application/json',
+                'Accept': 'application/vnd.github.antiope-preview+json',
+                'Authorization': 'Bearer ' + token,
+            },
+            payload=json.dumps(payload),
+        )
+        log_response(__name__ + '.scan_commits.update_check_run', response)
+        return response
+
+    r = update_check_run('in_progress')
+    assert 200 <= r.status_code < 400
+    token = get_installation_token(installation_id)
+    response = urlfetch.fetch(
+        '{0}/compare/{1}...{2}'.format(repository_url, before, after),
+        method='GET',
+        headers={
+            'Authorization': 'Bearer ' + token,
+        },
+    )
+    log_response(__name__ + '.scan_commits', response)
+    result = json.loads(response.content)
+    skipped = False
+    skipped_details = []
+    for commit in result['commits']:
+        if SKIP_RE.search(commit['commit']['message']):
+            skipped = True
+            skipped_details.append(commit)
+    changelog_written = False
+    changelog_details = []
+    for file in result['files']:
+        if FILENAME_RE.search(file['filename']):
+            changelog_written = True
+            changelog_details.append(file)
+    valid = changelog_written or skipped
+    if changelog_written:
+        message = 'This contains self-describing changelog.'
+        details = ''.join(
+            '\n\n### [{filename}]({html_url})\n\n```diff\n{patch}\n```'.format(
+                html_url='{0}#diff-{1}'.format(
+                    result['html_url'],
+                    hashlib.md5(file['filename']).hexdigest(),
+                ),
+                **file
+            )
+            for file in changelog_details
+        )
+    elif skipped:
+        message = 'Check was skipped.'
+        details = '\n\n'.join(
+            ' -  [`{sha}`]({html_url}) {message}'.format(
+                message='\n    '.join(commit['commit']['message'].split('\n'))
+                **commit
+            )
+            for commit in skipped_details
+        )
+    else:
+        message = 'This lacks self-describing changelog.'
+        details = ''
+    r = update_check_run(
+        'completed',
+        conclusion='success' if valid else 'failure',
+        completed_at=datetime.datetime.now(UTC).isoformat(),
+        output={
+            'title': message,
+            'summary': message + details,
+        },
+    )
+    assert 200 <= r.status_code < 400
