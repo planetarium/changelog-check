@@ -94,7 +94,7 @@ def receive_webhook():
     validate_signature()
     event = request.headers.get('X-Github-Event')
     data = request.get_json()
-    actions = check_suite, ping
+    actions = check_suite, pull_request, ping
     for action in actions:
         if action.__name__ == event:
             return action(data)
@@ -187,24 +187,13 @@ def check_suite(data):
         before = lookup(data, 'check_suite', 'before')
         after = lookup(data, 'check_suite', 'after')
         repo_url = lookup(data, 'repository', 'url')
+        default_branch = lookup(data, 'repository', 'default_branch')
         installation_id = lookup(data, 'installation', 'id')
-        token = get_installation_token(installation_id)
-        check_runs_url = repo_url + '/check-runs'
-        response = urlfetch.fetch(
-            check_runs_url,
-            method='POST',
-            headers={
-                'Content-Type': 'application/json',
-                'Accept': 'application/vnd.github.antiope-preview+json',
-                'Authorization': 'Bearer ' + token,
-            },
-            payload=json.dumps({
-                'name': CHECK_NAME,
-                'head_sha': after,
-            }),
-        )
-        log_response(__name__ + '.check_suite', response)
-        check_run_url = json.loads(response.content)['url']
+        check_run_url = ack_check_run(installation_id, repo_url, after)
+        if before == '0' * 40:
+            # It's probably a new branch; let's use heuristics assuming
+            # this branch is based on the default branch.
+            before = default_branch
         defer(
             scan_commits,
             installation_id,
@@ -214,6 +203,26 @@ def check_suite(data):
             after,
         )
     return json.dumps(data), 200, {'Content-Type': 'application/json'}
+
+
+def ack_check_run(installation_id, repository_url, head):
+    check_runs_url = repository_url + '/check-runs'
+    token = get_installation_token(installation_id)
+    response = urlfetch.fetch(
+        check_runs_url,
+        method='POST',
+        headers={
+            'Content-Type': 'application/json',
+            'Accept': 'application/vnd.github.antiope-preview+json',
+            'Authorization': 'Bearer ' + token,
+        },
+        payload=json.dumps({
+            'name': CHECK_NAME,
+            'head_sha': head,
+        }),
+    )
+    log_response(__name__ + '.ack_check_run', response)
+    return json.loads(response.content)['url']
 
 
 def scan_commits(installation_id, repository_url, check_run_url,
@@ -232,19 +241,21 @@ def scan_commits(installation_id, repository_url, check_run_url,
             payload=json.dumps(payload),
         )
         log_response(__name__ + '.scan_commits.update_check_run', response)
+        assert 200 <= response.status_code < 400, \
+            '{0}\n{1}'.format(check_run_url, response.content)
         return response
 
-    r = update_check_run('in_progress')
-    assert 200 <= r.status_code < 400
+    update_check_run('in_progress')
+    compare_url = '{0}/compare/{1}...{2}'.format(repository_url, before, after)
     token = get_installation_token(installation_id)
     response = urlfetch.fetch(
-        '{0}/compare/{1}...{2}'.format(repository_url, before, after),
+        compare_url,
         method='GET',
-        headers={
-            'Authorization': 'Bearer ' + token,
-        },
+        headers={'Authorization': 'Bearer ' + token},
     )
     log_response(__name__ + '.scan_commits', response)
+    assert 200 <= response.status_code < 400, \
+        '{0}\n{1}'.format(compare_url, response.content)
     result = json.loads(response.content)
     skipped = False
     skipped_details = []
@@ -260,10 +271,10 @@ def scan_commits(installation_id, repository_url, check_run_url,
             changelog_details.append(file)
     valid = changelog_written or skipped
     if changelog_written:
-        message = 'This contains self-describing changelog.'
-        details = ''.join(
-            '\n\n### [{filename}]({html_url})\n\n```diff\n{patch}\n```'.format(
-                html_url='{0}#diff-{1}'.format(
+        message = u'This contains self-describing changelog.'
+        details = u''.join(
+            u'\n\n### [{filename}]({html_url})\n\n```diff\n{patch}\n```'.format(
+                html_url=u'{0}#diff-{1}'.format(
                     result['html_url'],
                     hashlib.md5(file['filename']).hexdigest(),
                 ),
@@ -272,10 +283,12 @@ def scan_commits(installation_id, repository_url, check_run_url,
             for file in changelog_details
         )
     elif skipped:
-        message = 'Check was skipped.'
-        details = '\n\n'.join(
-            ' -  [`{sha}`]({html_url}) {message}'.format(
-                message='\n    '.join(commit['commit']['message'].split('\n'))
+        message = u'Check was skipped.'
+        details = u'\n\n'.join(
+            u' -  [`{sha}`]({html_url}) {message}'.format(
+                message=u'\n    '.join(
+                    commit['commit']['message'].split(u'\n')
+                ),
                 **commit
             )
             for commit in skipped_details
@@ -283,7 +296,7 @@ def scan_commits(installation_id, repository_url, check_run_url,
     else:
         message = 'This lacks self-describing changelog.'
         details = ''
-    r = update_check_run(
+    update_check_run(
         'completed',
         conclusion='success' if valid else 'failure',
         completed_at=datetime.datetime.now(UTC).isoformat(),
@@ -292,4 +305,22 @@ def scan_commits(installation_id, repository_url, check_run_url,
             'summary': message + details,
         },
     )
-    assert 200 <= r.status_code < 400
+
+
+def pull_request(data):
+    action = lookup(data, 'action')
+    if action in ('opened', 'reopened', 'synchronized'):
+        repo_url = lookup(data, 'pull_request', 'base', 'repo', 'url')
+        head = lookup(data, 'pull_request', 'head', 'sha')
+        base = lookup(data, 'pull_request', 'base', 'sha')
+        installation_id = lookup(data, 'installation', 'id')
+        check_run_url = ack_check_run(installation_id, repo_url, head)
+        defer(
+            scan_commits,
+            installation_id,
+            repo_url,
+            check_run_url,
+            base,
+            head,
+        )
+    return json.dumps(data), 200, {'Content-Type': 'application/json'}
