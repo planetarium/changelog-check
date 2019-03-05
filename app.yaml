@@ -8,8 +8,10 @@ handlers:
 - url: /config/
   script: changelog_check.app
   login: admin
+  secure: always
 - url: .*
   script: changelog_check.app
+  secure: always
 - url: /_ah/queue/deferred
   script: google.appengine.ext.deferred.deferred.application
   login: admin
