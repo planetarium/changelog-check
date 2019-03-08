@@ -9,6 +9,10 @@ devserver: devlib
 ngrok: devlib
 	ngrok http --host-header=rewrite 8080
 
+clean:
+	rm *.pyc
+	rm -rf lib/
+
 devlib: lib
 	pip2.7 install -t lib/ -r dev-requirements.txt
 

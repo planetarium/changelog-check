@@ -28,4 +28,4 @@ libraries:
   version: "0.11.10"
 
 env_variables:
-  DEBUG: '1'
+  DEBUG: '0'

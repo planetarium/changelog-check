@@ -168,7 +168,7 @@ def receive_webhook():
     validate_signature()
     event = request.headers.get('X-Github-Event')
     data = request.get_json()
-    actions = check_suite, pull_request, ping
+    actions = check_suite, check_run, pull_request, ping
     for action in actions:
         if action.__name__ == event:
             return action(data)
@@ -276,7 +276,8 @@ def check_suite(data):
             before,
             after,
         )
-    return json.dumps(data), 200, {'Content-Type': 'application/json'}
+        return json.dumps(data), 200, {'Content-Type': 'application/json'}
+    return 'null', 200, {'Content-Type': 'application/json'}
 
 
 def ack_check_run(installation_id, repository_url, head):
@@ -293,6 +294,7 @@ def ack_check_run(installation_id, repository_url, head):
         payload=json.dumps({
             'name': CHECK_NAME,
             'head_sha': head,
+            'status': 'queued',
         }),
     )
     log_response(__name__ + '.ack_check_run', response)
@@ -381,9 +383,30 @@ def scan_commits(installation_id, repository_url, check_run_url,
     )
 
 
+def check_run(data):
+    action = lookup(data, 'action')
+    if action == 'created':
+        app_id = lookup(data, 'check_run', 'app', 'id')
+        if int(get_config('app_id', -1)) == app_id:
+            check_run_url = lookup(data, 'check_run', 'url')
+            installation_id = lookup(data, 'installation', 'id')
+            prs = lookup(data, 'check_run', 'pull_requests')
+            for pr in prs:
+                defer(
+                    scan_commits,
+                    installation_id,
+                    pr['base']['repo']['url'],
+                    check_run_url,
+                    pr['base']['sha'],
+                    pr['head']['sha'],
+                )
+            return json.dumps(prs), 200, {'Content-Type': 'application/json'}
+    return 'null', 200, {'Content-Type': 'application/json'}
+
+
 def pull_request(data):
     action = lookup(data, 'action')
-    if action in ('opened', 'reopened', 'synchronized'):
+    if action in ('opened', 'reopened', 'synchronize'):
         repo_url = lookup(data, 'pull_request', 'base', 'repo', 'url')
         head = lookup(data, 'pull_request', 'head', 'sha')
         base = lookup(data, 'pull_request', 'base', 'sha')
@@ -397,4 +420,5 @@ def pull_request(data):
             base,
             head,
         )
-    return json.dumps(data), 200, {'Content-Type': 'application/json'}
+        return json.dumps(data), 200, {'Content-Type': 'application/json'}
+    return 'null', 200, {'Content-Type': 'application/json'}
