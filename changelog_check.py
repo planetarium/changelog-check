@@ -330,6 +330,20 @@ def scan_commits(installation_id, repository_url, check_run_url,
         headers={'Authorization': 'Bearer ' + token},
     )
     log_response(__name__ + '.scan_commits', response)
+    if response.status_code == 404 and \
+       '#compare-two-commits' in response.content:
+        update_check_run(
+            'completed',
+            conclusion='neutral',
+            completed_at=datetime.datetime.now(UTC).isoformat(),
+            output={
+                'title': 'Unable to compare commits',
+                'summary':
+                    'It was unable to compare commits:\n\n'
+                    '```json\n{0}\n```'.format(response.content),
+            },
+        )
+        return
     assert 200 <= response.status_code < 400, \
         '{0}\n{1}'.format(compare_url, response.content)
     result = json.loads(response.content)
